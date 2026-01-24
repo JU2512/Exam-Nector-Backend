@@ -1,0 +1,13 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# Temp / generated media
+app/temp/
+*.wav
+*.webm
+*.aac
