@@ -1,3 +1,5 @@
+# app/services/youtube_service.py
+
 import os
 import uuid
 import subprocess
@@ -7,27 +9,28 @@ TEMP_DIR = "app/temp/youtube"
 
 def download_youtube_audio(youtube_url: str) -> str:
     """
-    Downloads YouTube audio in a Whisper-compatible format
-    WITHOUT ffmpeg conversion.
+    Reliable YouTube audio/video download for Windows.
+    No cookies. Android client. Whisper-compatible.
     """
 
     os.makedirs(TEMP_DIR, exist_ok=True)
 
-    audio_id = str(uuid.uuid4())
-    output_template = os.path.join(TEMP_DIR, audio_id)
+    file_id = str(uuid.uuid4())
+    output_template = os.path.join(TEMP_DIR, file_id)
 
-    download_cmd = [
+    cmd = [
         "yt-dlp",
 
-        # ✅ Explicitly avoid SABR / encrypted streams
-        "-f", "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
+        # ✅ KEY FIX
+        "--extractor-args", "youtube:player_client=android",
 
-        # ✅ Stability flags
+        # ✅ Allow safe fallback formats
+        "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/best",
+
         "--no-playlist",
         "--force-ipv4",
         "--geo-bypass",
 
-        # Output
         "-o", f"{output_template}.%(ext)s",
 
         youtube_url,
@@ -35,17 +38,19 @@ def download_youtube_audio(youtube_url: str) -> str:
 
     try:
         subprocess.run(
-            download_cmd,
+            cmd,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError("Failed to download YouTube audio") from e
+    except subprocess.CalledProcessError:
+        raise RuntimeError(
+            "This YouTube video cannot be summarized due to restrictions."
+        )
 
-    audio_files = glob.glob(f"{output_template}.*")
+    files = glob.glob(f"{output_template}.*")
 
-    if not audio_files:
-        raise RuntimeError("No audio file downloaded")
+    if not files:
+        raise RuntimeError("No downloadable media found")
 
-    return audio_files[0]  # ✅ fed directly to Whisper
+    return files[0]  # mp4 / webm / m4a → Whisper can read directly
