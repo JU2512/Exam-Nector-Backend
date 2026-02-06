@@ -1,10 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from app.services.summarizer import summarize_text
-from app.services.ocr_service import extract_text_from_file
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
-
-
-
 import os
 import shutil
 
@@ -16,12 +12,18 @@ from app.schemas import (
     YouTubeSummaryResponse,
 )
 
-from app.services.whisper_service import (
-    extract_audio,
-    transcribe_audio,
+from app.services.summarizer import (
+    summarize_text,
+    summarize_text_stream,
 )
-
+from app.services.ocr_service import extract_text_from_file
+from app.services.whisper_service import transcribe_audio
 from app.services.youtube_service import download_youtube_audio
+
+from app.services.youtube_cache import (
+    get_cached_transcript,
+    save_transcript,
+)
 
 app = FastAPI(title="Exam Nector Backend")
 
@@ -36,11 +38,7 @@ def health_check():
 
 
 # =======================
-# DOCUMENT SUMMARY (MOCK)
-# =======================
-
-# =======================
-# DOCUMENT SUMMARY (OCR + AI)
+# DOCUMENT SUMMARY
 # =======================
 
 @app.post("/summarize/document", response_model=DocumentSummaryResponse)
@@ -48,7 +46,6 @@ async def summarize_document(
     file: UploadFile = File(...),
     depth: str = Form(...)
 ):
-    # Run OCR in threadpool
     extracted_text = await run_in_threadpool(
         extract_text_from_file, file
     )
@@ -59,7 +56,6 @@ async def summarize_document(
             filename=file.filename
         )
 
-    # Run summarization in threadpool
     summary = await run_in_threadpool(
         summarize_text, extracted_text, depth
     )
@@ -70,10 +66,22 @@ async def summarize_document(
     )
 
 
+# =======================
+# TEST SUMMARY
+# =======================
+
+@app.get("/test-summary")
+def test_summary():
+    return {
+        "summary": summarize_text(
+            "Artificial intelligence improves productivity by automating repetitive tasks.",
+            "easy"
+        )
+    }
 
 
 # =======================
-# WHISPER AUDIO TRANSCRIPTION
+# AUDIO / VIDEO TRANSCRIPTION
 # =======================
 
 @app.post("/transcribe/audio")
@@ -89,13 +97,7 @@ async def transcribe_audio_endpoint(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Video → extract audio
-    if file.content_type and file.content_type.startswith("video"):
-        audio_path = extract_audio(file_path)
-    else:
-        audio_path = file_path
-
-    text = transcribe_audio(audio_path, language)
+    text = transcribe_audio(file_path, language)
 
     return {
         "filename": file.filename,
@@ -109,8 +111,14 @@ async def transcribe_audio_endpoint(
 
 @app.post("/transcribe/youtube", response_model=YouTubeTranscriptResponse)
 def transcribe_youtube_video(request: YouTubeTranscriptRequest):
-    audio_path = download_youtube_audio(request.youtube_url)
-    transcript = transcribe_audio(audio_path)
+    cached = get_cached_transcript(request.youtube_url)
+
+    if cached:
+        transcript = cached
+    else:
+        audio_path = download_youtube_audio(request.youtube_url)
+        transcript = transcribe_audio(audio_path)
+        save_transcript(request.youtube_url, transcript)
 
     return YouTubeTranscriptResponse(
         youtube_url=request.youtube_url,
@@ -119,35 +127,92 @@ def transcribe_youtube_video(request: YouTubeTranscriptRequest):
 
 
 # =======================
-# YOUTUBE SUMMARY (FINAL PIPELINE)
+# YOUTUBE SUMMARY (NORMAL)
 # =======================
 
 @app.post("/summarize/youtube", response_model=YouTubeSummaryResponse)
 def summarize_youtube_video(request: SummaryRequest):
-    """
-    YouTube → Whisper → Ollama → Structured Summary
-    """
+    cached = get_cached_transcript(request.youtube_url)
 
-    # Step 1: Transcribe
-    audio_path = download_youtube_audio(request.youtube_url)
-    transcript = transcribe_audio(audio_path)
+    if cached:
+        transcript = cached
+    else:
+        audio_path = download_youtube_audio(request.youtube_url)
+        transcript = transcribe_audio(audio_path)
+        save_transcript(request.youtube_url, transcript)
 
-    # Step 2: Summarize (raw text)
-    raw_summary = summarize_text(transcript, depth=request.depth).strip()
+    raw_summary = summarize_text(
+        transcript,
+        depth=request.depth
+    ).strip()
 
-    # Step 3: Format based on depth
     if request.depth == "easy":
         summary = [
             line.strip("-• ").strip()
             for line in raw_summary.splitlines()
             if line.strip()
         ]
-    elif request.depth == "medium":
-        summary = raw_summary  # preserve headings & structure
-    else:  # long
-        summary = raw_summary  # full detailed notes
+    else:
+        summary = raw_summary
 
     return YouTubeSummaryResponse(
         youtube_url=request.youtube_url,
         summary=summary
+    )
+
+
+# =======================
+# YOUTUBE SUMMARY (STREAMING ✨)
+# =======================
+
+@app.post("/summarize/youtube/stream")
+def stream_youtube_summary(request: SummaryRequest):
+    cached = get_cached_transcript(request.youtube_url)
+
+    if cached:
+        transcript = cached
+    else:
+        audio_path = download_youtube_audio(request.youtube_url)
+        transcript = transcribe_audio(audio_path)
+        save_transcript(request.youtube_url, transcript)
+
+    generator = summarize_text_stream(
+        transcript,
+        depth=request.depth
+    )
+
+    return StreamingResponse(
+        generator,
+        media_type="text/plain"
+    )
+
+# =======================
+# DOCUMENT SUMMARY (STREAMING ✨)
+# =======================
+
+@app.post("/summarize/document/stream")
+async def stream_document_summary(
+    file: UploadFile = File(...),
+    depth: str = Form(...)
+):
+    # 1️⃣ OCR (blocking → threadpool)
+    extracted_text = await run_in_threadpool(
+        extract_text_from_file, file
+    )
+
+    if not extracted_text:
+        return StreamingResponse(
+            iter(["No readable English text could be extracted from the document."]),
+            media_type="text/plain",
+        )
+
+    # 2️⃣ Stream summary
+    generator = summarize_text_stream(
+        extracted_text,
+        depth=depth,
+    )
+
+    return StreamingResponse(
+        generator,
+        media_type="text/plain",
     )

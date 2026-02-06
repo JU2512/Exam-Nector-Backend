@@ -1,6 +1,9 @@
-import subprocess
+import requests
+import json
 
-OLLAMA_PATH = r"C:\Users\deepa\AppData\Local\Programs\Ollama\ollama.exe"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL_NAME = "llama3.2:1b"  # low-memory model
+
 
 def summarize_text(text: str, depth: str = "easy") -> str:
     prompt_map = {
@@ -9,18 +12,56 @@ def summarize_text(text: str, depth: str = "easy") -> str:
         "long": "Create detailed study notes from the following text:\n\n",
     }
 
+    # Safety limit
+    text = text[:3000]
     prompt = prompt_map.get(depth, prompt_map["easy"]) + text
 
-    result = subprocess.run(
-        [OLLAMA_PATH, "run", "llama3.2:3b"],
-        input=prompt,
-        text=True,
-        capture_output=True,
-        encoding="utf-8",
-        errors="ignore",
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "stream": False,
+        },
+        timeout=60,
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
+    if response.status_code != 200:
+        raise RuntimeError(response.text)
 
-    return result.stdout.strip()
+    return response.json().get("response", "").strip()
+
+
+# =======================
+# STREAMING VERSION (NEW)
+# =======================
+
+def summarize_text_stream(text: str, depth: str = "easy"):
+    prompt_map = {
+        "easy": "Summarize the following text in simple bullet points:\n\n",
+        "medium": "Provide a structured summary with headings:\n\n",
+        "long": "Create detailed study notes from the following text:\n\n",
+    }
+
+    text = text[:3000]
+    prompt = prompt_map.get(depth, prompt_map["easy"]) + text
+
+    with requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "stream": True,
+        },
+        stream=True,
+        timeout=120,
+    ) as response:
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+
+            data = json.loads(line.decode("utf-8"))
+            chunk = data.get("response", "")
+            if chunk:
+                yield chunk
